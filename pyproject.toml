@@ -13,6 +13,8 @@ dependencies = [
     "rawpy>=0.21",
     "torch>=2.2",
     "huggingface_hub>=0.25",
+    "colour-science>=0.4.3",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]

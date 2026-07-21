@@ -1,4 +1,6 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response, UploadFile
 
@@ -13,12 +15,28 @@ def _job_store(request: Request) -> JobStore:
     return request.app.state.job_store
 
 
+async def _run_and_cleanup(job_id: str, image_bytes: bytes, job_store: JobStore, lut_path: Path | None) -> None:
+    try:
+        await run_job(job_id, image_bytes, job_store, lut_path=lut_path)
+    finally:
+        if lut_path is not None:
+            lut_path.unlink(missing_ok=True)
+
+
 @router.post("")
-async def submit_job(request: Request, file: UploadFile):
+async def submit_job(request: Request, file: UploadFile, lut: UploadFile | None = None):
     job_store = _job_store(request)
     record = await job_store.create()
     image_bytes = await file.read()
-    asyncio.create_task(run_job(record.job_id, image_bytes, job_store))
+
+    lut_path: Path | None = None
+    if lut is not None:
+        lut_bytes = await lut.read()
+        with tempfile.NamedTemporaryFile(suffix=".cube", delete=False) as tmp:
+            tmp.write(lut_bytes)
+            lut_path = Path(tmp.name)
+
+    asyncio.create_task(_run_and_cleanup(record.job_id, image_bytes, job_store, lut_path))
     return {"job_id": record.job_id, "status": record.status.value}
 
 

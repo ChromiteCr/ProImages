@@ -1,5 +1,6 @@
 import asyncio
 import io
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -21,11 +22,11 @@ def _encode(image: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
-async def run_job(job_id: str, image_bytes: bytes, job_store: JobStore) -> None:
+async def run_job(job_id: str, image_bytes: bytes, job_store: JobStore, lut_path: str | Path | None = None) -> None:
     await job_store.mark_running(job_id)
     try:
         image = await asyncio.to_thread(_decode, image_bytes)
-        result = await asyncio.to_thread(process_image, image)
+        result = await asyncio.to_thread(process_image, image, lut_path=lut_path)
         result_bytes = await asyncio.to_thread(_encode, result)
         await job_store.mark_completed(job_id, result_bytes)
     except Exception as exc:  # noqa: BLE001 - surfaced to the client via job status
