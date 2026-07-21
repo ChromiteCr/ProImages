@@ -7,7 +7,7 @@
 3. **景深虚化**（`proimages/core/depth_bokeh`）：目标是用Depth Anything V2/MiDaS做单目深度估计，再用物理光学模型（弥散圆随景深和光圈变化、光圈形状、遮挡边缘正确合成）渲染虚化，而不是简单高斯模糊
 4. **LUT调色与物理相机/胶片效果**（`proimages/core/physical_fx`）：应用行业标准`.cube` LUT文件调色，再叠加物理胶片颗粒、halation（高光光晕）、高光滚降、镜头暗角（cos⁴渐晕）等物理效果。这个模块内部是一条可扩展的"物理效果链"（`effects.py`里的`STAGES`列表），每个效果都是独立文件、独立函数，以后要加色差（chromatic aberration）、镜头光晕（lens flare）、衍射星芒等新的物理效果，只要新增一个文件并加进`STAGES`列表即可，不需要改这个模块之外的任何代码
 
-`denoise`、`hdr`、`depth_bokeh`三个模块，以及`physical_fx`里的`halation`、`rolloff`、`vignette`三个效果，目前都还是占位直通（identity），只把图片原样传递到下一步。`physical_fx`里的LUT应用和颗粒这两个效果已经是真实算法（见下）。
+`denoise`、`hdr`、`depth_bokeh`三个模块目前还是占位直通（identity）。`physical_fx`里的5个效果——LUT、颗粒、halation、滚降、暗角——现在全部是真实算法（见下）。
 
 ### LUT应用（`physical_fx/lut.py`）
 
@@ -20,7 +20,19 @@
 - **颗粒可见度随曝光变化**：真实胶片的颗粒在中间调最明显，在纯黑/纯白处几乎看不见（对应胶片特性曲线在两端的响应饱和）。代码里用`4 * L * (1 - L)`这个抛物线权重（`L`是像素亮度，取值[0,1]），在`L=0.5`时权重最大为1，在`L=0`或`L=1`时权重为0
 - **颗粒尺寸/成团**：先生成逐像素独立的高斯白噪声，再用`scipy.ndimage.gaussian_filter`做空间模糊，让相邻像素的噪声相关起来，形成类似真实卤化银颗粒"成团"的视觉效果，`grain_size`控制这个模糊半径（对应颗粒物理尺寸）
 
-`intensity`控制颗粒强度，`rng`传入`numpy.random.Generator`可以让结果可复现（不传则每次调用结果都不同）。
+`intensity`控制颗粒强度，`rng`传入`numpy.random.Generator`可以让结果可复现（不传则每次调用结果都不同）。luminance计算复用了`core/color`（见下）。
+
+### Halation（`physical_fx/halation.py`）
+
+`apply_halation(image, threshold=0.75, radius=8.0, intensity=0.35)`模拟高光在片基里散射后重新曝光周围乳剂形成的红橙色光晕：先按亮度阈值`threshold`软性提取高光区域（`highlight_mask`，低于阈值的地方是0），再用`scipy.ndimage.gaussian_filter`（`sigma=radius`）把这个高光蒙版做大半径模糊模拟光在片基里的散射，最后乘上暖色调`HALATION_TINT=(1.0, 0.45, 0.25)`（红>绿>蓝，对应胶片anti-halation染料层的光谱特性）叠加回原图。
+
+### 高光滚降（`physical_fx/rolloff.py`）
+
+`apply_rolloff(image, strength=0.5)`模拟胶片特征曲线（H&D曲线）两端平、中间陡的形状：用平滑阶跃函数`smoothstep(x) = x²(3-2x)`——它在`x=0`和`x=1`处导数为0（对应曲线的趾部toe和肩部shoulder，压缩阴影/高光细节不至硬切），在`x=0.5`处导数最大（对应中间调反差最强），`strength`控制在原图和完整smoothstep之间的混合比例（0=不变，1=完整曲线）。
+
+### 镜头暗角（`physical_fx/vignette.py`）
+
+`apply_vignette(image, strength=0.6)`按cos⁴渐晕定律模拟自然渐晕：以图像中心为原点算每个像素到中心的归一化半径`radius`（中心=0，最远角=1），乘以`strength`近似成入射角`θ`，衰减系数为`cos(θ)⁴`，画面中心不受影响（`θ=0`时衰减=1），向四角逐渐变暗。
 
 ## 项目结构
 
@@ -36,13 +48,15 @@ proimages/
       __init__.py     process()：lut_path给定时先调apply_lut()，再依次跑STAGES里的4个效果
       effects.py      STAGES列表：[apply_grain, apply_halation, apply_rolloff, apply_vignette]
                       （apply_lut签名不同，在__init__.py里单独处理，不在这个列表里）
-      lut.py           apply_lut(image, lut_path)->image，用colour-science读.cube并三线性插值应用，已实现
+      lut.py           apply_lut(image, lut_path)->image，用colour-science读.cube并三线性插值应用
       grain.py         apply_grain(image, intensity=0.04, grain_size=1.0, rng=None)->image，
-                      中间调加权+空间相关噪声模拟胶片颗粒，已实现
-      halation.py      apply_halation(image)->image，当前直通
-      rolloff.py       apply_rolloff(image)->image，当前直通
-      vignette.py      apply_vignette(image)->image，当前直通
-    color/            色彩空间共用工具，尚未写入内容，留作后续色彩转换代码的落点
+                      中间调加权+空间相关噪声模拟胶片颗粒
+      halation.py      apply_halation(image, threshold=0.75, radius=8.0, intensity=0.35)->image，
+                      高光提取+大半径模糊+暖色调叠加模拟halation光晕
+      rolloff.py       apply_rolloff(image, strength=0.5)->image，smoothstep S形曲线模拟胶片特征曲线
+      vignette.py      apply_vignette(image, strength=0.6)->image，cos⁴渐晕定律模拟镜头暗角
+    color/            色彩空间共用工具；luminance(image)->ndarray按Rec.709权重算亮度，
+                      grain.py和halation.py都复用它
     pipeline.py       process_image(image, lut_path=None)按denoise→hdr→depth_bokeh→physical_fx的顺序
                       依次调用，lut_path透传给physical_fx.process()
   gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定
@@ -97,6 +111,7 @@ uv run pytest                    # 跑测试
 
 | 版本 | 日期 | 变更内容 | 类型 |
 |------|------|----------|------|
+| P2c | 2026-07-21 | 实现halation（高光提取+大半径模糊+暖色调叠加）、高光滚降（smoothstep S曲线）、镜头暗角（cos⁴渐晕）三个效果，luminance计算提取到core/color供grain/halation复用；至此physical_fx的5个效果全部实现完毕 | feat |
 | P2b | 2026-07-21 | 实现LUT应用（colour-science三线性插值.cube）和物理颗粒（中间调加权+空间相关噪声）两个效果，CLI加--lut参数，API的/v1/jobs加lut上传字段 | feat |
 | P2a | 2026-07-21 | core/lut_grain重构为core/physical_fx，内部拆成LUT/颗粒/halation/滚降/暗角5个独立效果文件+STAGES有序效果链，便于后续新增物理效果 | refactor |
 | P2 | 2026-07-21 | 完成工程骨架：FastAPI异步任务API + CLI，两者共用core/管线（4个模块均为占位直通），gpu_config设备探测，model_download权重下载占位 | milestone |

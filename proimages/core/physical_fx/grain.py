@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+from proimages.core.color import luminance
 
 
 def apply_grain(
@@ -18,8 +18,8 @@ def apply_grain(
         noise = gaussian_filter(noise, sigma=(grain_size, grain_size, 0))
         noise /= noise.std() + 1e-8
 
-    luminance = image @ LUMA_WEIGHTS
-    midtone_weight = 4.0 * luminance * (1.0 - luminance)
+    luma = luminance(image)
+    midtone_weight = 4.0 * luma * (1.0 - luma)
 
     grain = noise * intensity * midtone_weight[..., None]
     return (image + grain).clip(0.0, 1.0)
