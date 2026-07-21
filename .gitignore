@@ -1,0 +1,19 @@
+# Sample assets (not for version control)
+/Example-imgs/
+/Example-LUTs/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Downloaded model weights cache
+.models/
