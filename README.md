@@ -5,7 +5,7 @@
 1. **降噪**（`proimages/core/denoise`）：目标是用预训练的Restormer或NAFNet处理手机小底传感器的高噪点，RAW输入会在去马赛克之前先在拜耳域做降噪
 2. **HDR/动态范围**（`proimages/core/hdr`）：目标是先用经典exposure fusion算法恢复单张照片的高光/阴影细节，后续再考虑单图HDR重建的深度学习方法
 3. **景深虚化**（`proimages/core/depth_bokeh`）：目标是用Depth Anything V2/MiDaS做单目深度估计，再用物理光学模型（弥散圆随景深和光圈变化、光圈形状、遮挡边缘正确合成）渲染虚化，而不是简单高斯模糊
-4. **LUT调色/胶片质感**（`proimages/core/lut_grain`）：目标是应用行业标准`.cube` LUT文件调色，再叠加物理胶片颗粒、halation（高光光晕）、高光滚降、镜头暗角（cos⁴渐晕）等物理效果
+4. **LUT调色与物理相机/胶片效果**（`proimages/core/physical_fx`）：目标是应用行业标准`.cube` LUT文件调色，再叠加物理胶片颗粒、halation（高光光晕）、高光滚降、镜头暗角（cos⁴渐晕）等物理效果。这个模块内部是一条可扩展的"物理效果链"（`effects.py`里的`STAGES`列表），每个效果都是独立文件、独立函数，以后要加色差（chromatic aberration）、镜头光晕（lens flare）、衍射星芒等新的物理效果，只要新增一个文件并加进`STAGES`列表即可，不需要改这个模块之外的任何代码
 
 四个模块目前都是占位直通（identity），只把图片原样传递到下一步，还没有实现上述真实算法。
 
@@ -19,9 +19,16 @@ proimages/
     denoise/          降噪模块，process(image)->image，当前直通
     hdr/               HDR模块，process(image)->image，当前直通
     depth_bokeh/      景深虚化模块，process(image)->image，当前直通
-    lut_grain/        LUT/胶片质感模块，process(image)->image，当前直通
+    physical_fx/      LUT调色与物理相机/胶片效果模块，process(image)->image，当前直通
+      effects.py      STAGES列表，按顺序排着apply_lut、apply_grain、apply_halation、
+                      apply_rolloff、apply_vignette这5个效果函数
+      lut.py           apply_lut(image)->image，当前直通
+      grain.py         apply_grain(image)->image，当前直通
+      halation.py      apply_halation(image)->image，当前直通
+      rolloff.py       apply_rolloff(image)->image，当前直通
+      vignette.py      apply_vignette(image)->image，当前直通
     color/            色彩空间共用工具，尚未写入内容，留作后续色彩转换代码的落点
-    pipeline.py       process_image()按denoise→hdr→depth_bokeh→lut_grain的顺序依次调用四个模块
+    pipeline.py       process_image()按denoise→hdr→depth_bokeh→physical_fx的顺序依次调用四个模块
   gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定
   model_download.py  ensure_model(repo_id)用huggingface_hub.snapshot_download把预训练权重下载到
                       ~/.cache/proimages/models/（可用PROIMAGES_MODELS_DIR环境变量改路径），已存在则直接复用缓存
@@ -72,5 +79,6 @@ uv run pytest                    # 跑测试
 
 | 版本 | 日期 | 变更内容 | 类型 |
 |------|------|----------|------|
+| P2a | 2026-07-21 | core/lut_grain重构为core/physical_fx，内部拆成LUT/颗粒/halation/滚降/暗角5个独立效果文件+STAGES有序效果链，便于后续新增物理效果 | refactor |
 | P2 | 2026-07-21 | 完成工程骨架：FastAPI异步任务API + CLI，两者共用core/管线（4个模块均为占位直通），gpu_config设备探测，model_download权重下载占位 | milestone |
 | P1 | 2026-07-21 | 初始化项目仓库与README | milestone |

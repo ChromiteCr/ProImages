@@ -1,8 +1,8 @@
 import numpy as np
 
-from proimages.core import denoise, depth_bokeh, hdr, lut_grain
+from proimages.core import denoise, depth_bokeh, hdr, physical_fx
 
-STAGES = (denoise, hdr, depth_bokeh, lut_grain)
+STAGES = (denoise, hdr, depth_bokeh, physical_fx)
 
 
 def process_image(image: np.ndarray) -> np.ndarray:
