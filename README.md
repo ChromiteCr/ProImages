@@ -79,7 +79,8 @@ Key由调用方每次传入（CLI参数或API请求体），**服务器不存盘
 ```
 proimages/
   core/
-    system/io.py     解码RAW（.dng/.cr2/.cr3/.nef/.arw/.raf/.rw2，用rawpy）和JPEG/PNG/HEIC（用Pillow），
+    system/io.py     解码RAW（.dng/.cr2/.cr3/.nef/.arw/.raf/.rw2，用rawpy，惰性import、
+                      缺失时报错指向heavy组）和JPEG/PNG/HEIC（用Pillow），
                       统一转成[0,1]浮点RGB numpy数组；save_image()负责编码回8位图片写盘
     denoise/          降噪模块，process(image)->image，当前直通
     hdr/               HDR模块，process(image)->image，当前直通
@@ -109,7 +110,9 @@ proimages/
                       grain.py、halation.py、lut_gen/grade.py、lut_gen/image_stats.py都复用它
     pipeline.py       process_image(image, lut_path=None)按denoise→hdr→depth_bokeh→physical_fx的顺序
                       依次调用，lut_path透传给physical_fx.process()
-  gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定
+  gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定；
+                      torch是惰性import，未安装（基础安装）时返回"cpu"，
+                      这样基础安装也能起完整API而不是在启动时崩掉
   model_download.py  ensure_model(repo_id)用huggingface_hub.snapshot_download把预训练权重下载到
                       ~/.cache/proimages/models/（可用PROIMAGES_MODELS_DIR环境变量改路径），已存在则直接复用缓存
   cli_args.py         add_device_argument()定义共用的--device参数，CLI和API服务入口都调用它
@@ -142,10 +145,30 @@ CLI和API服务共用同一份`core/`处理逻辑，不存在"CLI版本"和"API�
 
 ## 依赖与运行
 
-用[uv](https://github.com/astral-sh/uv)管理依赖，`pyproject.toml`里声明了fastapi、uvicorn、numpy、pillow、rawpy、torch、huggingface_hub、colour-science、scipy、openai、pydantic等核心依赖，`dev`可选依赖组里是pytest和httpx。
+用[uv](https://github.com/astral-sh/uv)管理依赖。依赖分成两层，因为LUT这条链路完全用不到深度学习相关的重依赖：
+
+| | 包含 | 装出来的虚拟环境 | 能用什么 |
+|---|---|---|---|
+| **基础安装** | fastapi、uvicorn、python-multipart、numpy、pillow、colour-science、scipy、openai、pydantic | ~220MB | LUT全链路：`core/lut_gen`生成LUT、`core/physical_fx`全部5个效果、完整API（含`/v1/luts/*`和`/v1/jobs`）、三个CLI入口 |
+| **`heavy`可选组** | 额外加torch、rawpy、huggingface_hub | ~800MB+ | 再加上RAW格式输入，以及`core/denoise`、`core/hdr`、`core/depth_bokeh`（这三个模块目前还是占位直通，等接入预训练模型后才真正需要） |
 
 ```bash
-uv sync --extra dev              # 安装依赖（含测试用的dev组）
+# 只用LUT链路（比如被其他项目当依赖装）
+uv sync --extra dev
+
+# 完整安装（需要RAW输入或后续的降噪/HDR/景深模块）
+uv sync --extra heavy --extra dev
+```
+
+被其他项目作为可编辑依赖引入时，不带extra即可，不会拖进torch：
+
+```bash
+uv pip install -e ../ProImages
+```
+
+基础安装下`gpu_config.detect_device()`返回`"cpu"`——torch本身就是提供GPU访问的东西，没有它就确实只有CPU，而需要GPU的那三个模块在基础安装下本来也不可用。对RAW文件调用`load_image()`会抛出明确指向`proimages[heavy]`的ImportError，而不是一个裸的`No module named 'rawpy'`。
+
+```bash
 
 uv run proimages input.jpg output.png --device cpu                       # CLI：处理单张照片，不调色
 uv run proimages input.jpg output.png --lut "Example-LUTs/Arabica 12.CUBE"  # CLI：额外套用一个LUT
@@ -189,6 +212,7 @@ API Key也可以通过`PROIMAGES_API_KEY`环境变量传，省得每次敲。生
 
 | 版本 | 日期 | 变更内容 | 类型 |
 |------|------|----------|------|
+| P2d1 | 2026-07-22 | 拆分依赖：torch/rawpy/huggingface_hub移入heavy可选组，基础安装只保留LUT链路所需（虚拟环境800M+降至~220MB）；gpu_config的torch改为惰性import并在缺失时回退cpu，使基础安装也能起完整API；RAW读取缺rawpy时报错指向heavy组 | refactor |
 | P2d | 2026-07-22 | 新增AI生成LUT模块core/lut_gen：GradeParams跨仓库契约、参数化调色数学、.cube烘焙、参考图色彩统计、OpenAI兼容客户端；新增proimages-lut命令行入口和/v1/luts/{generate,bake}两个接口 | feat |
 | P2c | 2026-07-21 | 实现halation（高光提取+大半径模糊+暖色调叠加）、高光滚降（smoothstep S曲线）、镜头暗角（cos⁴渐晕）三个效果，luminance计算提取到core/color供grain/halation复用；至此physical_fx的5个效果全部实现完毕 | feat |
 | P2b | 2026-07-21 | 实现LUT应用（colour-science三线性插值.cube）和物理颗粒（中间调加权+空间相关噪声）两个效果，CLI加--lut参数，API的/v1/jobs加lut上传字段 | feat |

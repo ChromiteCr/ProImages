@@ -949,17 +949,14 @@ source = { editable = "." }
 dependencies = [
     { name = "colour-science" },
     { name = "fastapi" },
-    { name = "huggingface-hub" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "openai" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "python-multipart" },
-    { name = "rawpy" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -968,25 +965,30 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
 ]
+heavy = [
+    { name = "huggingface-hub" },
+    { name = "rawpy" },
+    { name = "torch" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "colour-science", specifier = ">=0.4.3" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "huggingface-hub", specifier = ">=0.25" },
+    { name = "huggingface-hub", marker = "extra == 'heavy'", specifier = ">=0.25" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "rawpy", specifier = ">=0.21" },
+    { name = "rawpy", marker = "extra == 'heavy'", specifier = ">=0.21" },
     { name = "scipy", specifier = ">=1.11" },
-    { name = "torch", specifier = ">=2.2" },
+    { name = "torch", marker = "extra == 'heavy'", specifier = ">=2.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["heavy", "dev"]
 
 [[package]]
 name = "pydantic"

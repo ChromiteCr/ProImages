@@ -9,7 +9,13 @@ RAW_EXTENSIONS = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2"}
 def load_image(path: str | Path) -> np.ndarray:
     path = Path(path)
     if path.suffix.lower() in RAW_EXTENSIONS:
-        import rawpy
+        try:
+            import rawpy
+        except ImportError as exc:
+            raise ImportError(
+                f"Reading {path.suffix} needs rawpy, which ships in the 'heavy' extra: "
+                "pip install 'proimages[heavy]'"
+            ) from exc
 
         with rawpy.imread(str(path)) as raw:
             rgb = raw.postprocess(output_bps=16)
