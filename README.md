@@ -7,6 +7,8 @@
 3. **景深虚化**（`proimages/core/depth_bokeh`）：目标是用Depth Anything V2/MiDaS做单目深度估计，再用物理光学模型（弥散圆随景深和光圈变化、光圈形状、遮挡边缘正确合成）渲染虚化，而不是简单高斯模糊
 4. **LUT调色与物理相机/胶片效果**（`proimages/core/physical_fx`）：应用行业标准`.cube` LUT文件调色，再叠加物理胶片颗粒、halation（高光光晕）、高光滚降、镜头暗角（cos⁴渐晕）等物理效果。这个模块内部是一条可扩展的"物理效果链"（`effects.py`里的`STAGES`列表），每个效果都是独立文件、独立函数，以后要加色差（chromatic aberration）、镜头光晕（lens flare）、衍射星芒等新的物理效果，只要新增一个文件并加进`STAGES`列表即可，不需要改这个模块之外的任何代码
 
+除了这四个处理模块，还有一个**AI生成LUT**模块（`proimages/core/lut_gen`）：用户填入自己的模型名称和API Key，用一句话描述想要的风格、或丢一张参考图，就能生成一个`.cube`文件供上面第4个模块使用。详见下方"AI生成LUT"一节。
+
 `denoise`、`hdr`、`depth_bokeh`三个模块目前还是占位直通（identity）。`physical_fx`里的5个效果——LUT、颗粒、halation、滚降、暗角——现在全部是真实算法（见下）。
 
 ### LUT应用（`physical_fx/lut.py`）
@@ -34,6 +36,44 @@
 
 `apply_vignette(image, strength=0.6)`按cos⁴渐晕定律模拟自然渐晕：以图像中心为原点算每个像素到中心的归一化半径`radius`（中心=0，最远角=1），乘以`strength`近似成入射角`θ`，衰减系数为`cos(θ)⁴`，画面中心不受影响（`θ=0`时衰减=1），向四角逐渐变暗。
 
+## AI生成LUT（`core/lut_gen`）
+
+上面的`apply_lut()`只能**消费**已有的`.cube`文件。这个模块负责**生产**：用户提供自己的模型名称和API Key，用一句话描述风格（"温暖的夏日胶片感"）或丢一张参考图，得到一个`.cube`。
+
+### 为什么是"AI输出参数、Python烘焙LUT"
+
+LLM不能直接输出LUT。一个33³的`.cube`有35,937个RGB三元组、约10万个浮点数，逐token生成既慢又贵，而且几乎必然不平滑——相邻格点跳变会让成片出现色块断层。
+
+所以这里的分工是：**LLM只输出一小组调色参数（JSON），Python用这些参数确定性地烘焙出`.cube`**。这也正好和iPhone的"摄影风格"二维调色盘同构——那个盘本质上就是3个数字驱动一个参数化调色模型。于是AI和调色盘共用同一套参数：AI给初始值，用户拖盘微调，两者走同一个烘焙函数。
+
+### `GradeParams`：跨仓库的公开契约
+
+调色盘UI在**另一个独立仓库**里，通过HTTP消费本仓库的API，所以`GradeParams`（`lut_gen/params.py`）是两个仓库之间的契约，带`schema_version`字段供对方检测不匹配。字段采用调色行业标准的lift/gamma/gain模型（DaVinci等专业工具的通用语言，LLM也熟悉）：
+
+| 字段 | 范围 | 含义 | 对应调色盘 |
+|---|---|---|---|
+| `tone` | -1..1 | 整体明度 | **Y轴** |
+| `saturation` | -1..1 | 饱和度，灰↔纯 | **X轴** |
+| `temperature` | -1..1 | 色温，冷↔暖 | **下方滑块** |
+| `tint` | -1..1 | 色调，绿↔品红 | — |
+| `contrast` | -1..1 | 对比度 | — |
+| `lift` / `gamma` / `gain` | 各RGB三元组 | 阴影/中间调/高光的色偏 | — |
+| `name` / `description` | str | 风格名和说明，写进`.cube`注释 | — |
+
+前三个字段就是盘的三个自由度。所有数值范围由pydantic强制校验——模型给出越界值时会在解析阶段被挡住，不会流到烘焙环节。UI仓库可以直接从`/openapi.json`生成客户端，字段说明里写明了各自对应盘的哪个轴。
+
+### 模块内部
+
+- **`grade.py`**：`apply_grade(rgb, params)`是纯数学函数，对任意形状为`(..., 3)`的数组生效。这点是刻意设计的——LUT的identity表是`(N,N,N,3)`、照片是`(H,W,3)`，同一个函数都能处理，所以"烘焙LUT"和"直接调色一张图"共用同一份实现，不会两边算法漂移。运算顺序：白平衡(temperature/tint) → lift/gamma/gain → 对比度(绕0.5为轴) → 明度 → 饱和度（复用`core/color.luminance()`）
+- **`bake.py`**：用`colour.LUT3D.linear_table(size)`拿到identity表，过一遍`apply_grade()`，写成`.cube`。`colour.write_LUT`只接受文件路径、不能返回字符串，所以需要`.cube`文本时走临时文件再读回
+- **`image_stats.py`**：`extract_color_stats(image)`按亮度分位数把像素切成阴影/中间调/高光三段分别算平均RGB，再算整体冷暖倾向、绿品倾向、饱和度、对比度。**参考图这条路径不让模型"目测"色温**——先用算法量出客观数字，模型只负责把数字翻译成风格化参数，结果比纯多模态判断稳定得多
+- **`llm.py`**：OpenAI兼容客户端，走JSON输出模式。只实现这一套协议是因为它能覆盖OpenAI、DeepSeek、Moonshot、通义千问、智谱以及本地ollama/vLLM——都提供兼容端点，用户只需改`base_url`
+- **`prompts.py`**：system prompt里逐条说明每个参数的含义和取值习惯（提示模型大多数风格只需要温和的数值，别把每个参数都推到极限）
+
+### API Key的处理
+
+Key由调用方每次传入（CLI参数或API请求体），**服务器不存盘、不进日志、不写进`JobStore`**，只在单次请求的生命周期内存在。`lut_routes.py`里模型调用失败时只回报异常类型、不回显请求内容——错误消息是最容易泄露Key的地方，有一个专门的测试用例（`test_generate_error_response_does_not_leak_the_api_key`）盯着这条。
+
 ## 项目结构
 
 ```
@@ -55,8 +95,18 @@ proimages/
                       高光提取+大半径模糊+暖色调叠加模拟halation光晕
       rolloff.py       apply_rolloff(image, strength=0.5)->image，smoothstep S形曲线模拟胶片特征曲线
       vignette.py      apply_vignette(image, strength=0.6)->image，cos⁴渐晕定律模拟镜头暗角
+    lut_gen/          AI生成LUT模块（生产.cube，与physical_fx/lut.py的"消费"相对）
+      params.py       GradeParams（pydantic模型），跨仓库公开契约，带schema_version
+      grade.py        apply_grade(rgb, params)->rgb，参数化调色数学，
+                      对(...,3)任意形状生效，烘焙LUT和调色图片共用这一份
+      bake.py         bake_lut()/bake_cube_file()/bake_cube_text()，
+                      identity表过apply_grade再写成.cube
+      image_stats.py  extract_color_stats(image)->dict，按亮度分位数拆阴影/中间调/高光
+                      分别统计，供参考图路径喂给模型；复用core/color.luminance()
+      llm.py          OpenAI兼容客户端，params_from_description()/params_from_reference_image()
+      prompts.py      system prompt和两条入口各自的user prompt模板
     color/            色彩空间共用工具；luminance(image)->ndarray按Rec.709权重算亮度，
-                      grain.py和halation.py都复用它
+                      grain.py、halation.py、lut_gen/grade.py、lut_gen/image_stats.py都复用它
     pipeline.py       process_image(image, lut_path=None)按denoise→hdr→depth_bokeh→physical_fx的顺序
                       依次调用，lut_path透传给physical_fx.process()
   gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定
@@ -64,6 +114,8 @@ proimages/
                       ~/.cache/proimages/models/（可用PROIMAGES_MODELS_DIR环境变量改路径），已存在则直接复用缓存
   cli_args.py         add_device_argument()定义共用的--device参数，CLI和API服务入口都调用它
   cli.py              proimages命令行入口：读入一张图片路径→跑process_image()→写到输出路径
+  lut_cli.py          proimages-lut命令行入口：--describe/--reference/--params三选一，
+                      生成或烘焙出.cube；--params路径不调LLM也不需要Key
   api/
     app.py            FastAPI应用实例，挂载GET /health和jobs路由
     lifespan.py       FastAPI启动时用detect_device()探测设备存到app.state.device，
@@ -79,13 +131,18 @@ proimages/
       routes.py       三个接口：POST /v1/jobs（上传文件，创建任务并用asyncio.create_task后台跑，
                       立即返回job_id）、GET /v1/jobs/{job_id}（查状态，不存在返回404）、
                       GET /v1/jobs/{job_id}/result（状态不是completed时返回409，是的话返回PNG字节）
+      lut_routes.py   两个同步接口：POST /v1/luts/generate（传describe或reference + model/api_key
+                      /base_url，返回GradeParams和烘焙好的.cube）、POST /v1/luts/bake
+                      （只传GradeParams，不调LLM不需要Key，毫秒级——这是调色盘UI拖完盘后调的那个）
 ```
+
+LUT这两个接口是同步的，不走上面的job异步机制：返回体是小JSON、没有GPU排队问题、模型输出几十个数字通常2-5秒就回来，调用方在按钮上转个圈即可。`JobStore`/`JobRecord`保持只服务图像处理任务。
 
 CLI和API服务共用同一份`core/`处理逻辑，不存在"CLI版本"和"API版本"两套算法代码。
 
 ## 依赖与运行
 
-用[uv](https://github.com/astral-sh/uv)管理依赖，`pyproject.toml`里声明了fastapi、uvicorn、numpy、pillow、rawpy、torch、huggingface_hub、colour-science、scipy等核心依赖，`dev`可选依赖组里是pytest和httpx。
+用[uv](https://github.com/astral-sh/uv)管理依赖，`pyproject.toml`里声明了fastapi、uvicorn、numpy、pillow、rawpy、torch、huggingface_hub、colour-science、scipy、openai、pydantic等核心依赖，`dev`可选依赖组里是pytest和httpx。
 
 ```bash
 uv sync --extra dev              # 安装依赖（含测试用的dev组）
@@ -103,6 +160,27 @@ curl http://127.0.0.1:8001/v1/jobs/<job_id>/result -o output.png   # 完成后�
 uv run pytest                    # 跑测试
 ```
 
+生成LUT（`proimages-lut`）：
+
+```bash
+# 用一句话描述风格生成
+uv run proimages-lut --describe "温暖的夏日胶片感" --model gpt-4o --api-key sk-xxx -o summer.cube
+
+# 用参考图生成（先算色彩统计再连图给模型）
+uv run proimages-lut --reference ref.jpg --model gpt-4o --api-key sk-xxx -o ref_look.cube
+
+# 直接从参数文件烘焙，不调LLM、不需要Key
+uv run proimages-lut --params params.json -o custom.cube
+
+# 指向其他OpenAI兼容厂商
+uv run proimages-lut --describe "赛博朋克冷调" --model deepseek-chat \
+  --api-key sk-xxx --base-url https://api.deepseek.com/v1 -o cyber.cube
+
+# 加 --save-params 会把AI给的参数也存成JSON，方便手动微调后重新烘焙
+```
+
+API Key也可以通过`PROIMAGES_API_KEY`环境变量传，省得每次敲。生成出来的`.cube`直接就能给上面的`proimages --lut`用。
+
 `--device`不传时会自动探测：有CUDA用cuda，苹果芯片用mps，否则用cpu。
 
 测试用的样张（`Example-imgs/`）和LUT文件（`Example-LUTs/`，35个`.CUBE`文件）只放在本地，`.gitignore`里已排除，不会进版本库。
@@ -111,6 +189,7 @@ uv run pytest                    # 跑测试
 
 | 版本 | 日期 | 变更内容 | 类型 |
 |------|------|----------|------|
+| P2d | 2026-07-22 | 新增AI生成LUT模块core/lut_gen：GradeParams跨仓库契约、参数化调色数学、.cube烘焙、参考图色彩统计、OpenAI兼容客户端；新增proimages-lut命令行入口和/v1/luts/{generate,bake}两个接口 | feat |
 | P2c | 2026-07-21 | 实现halation（高光提取+大半径模糊+暖色调叠加）、高光滚降（smoothstep S曲线）、镜头暗角（cos⁴渐晕）三个效果，luminance计算提取到core/color供grain/halation复用；至此physical_fx的5个效果全部实现完毕 | feat |
 | P2b | 2026-07-21 | 实现LUT应用（colour-science三线性插值.cube）和物理颗粒（中间调加权+空间相关噪声）两个效果，CLI加--lut参数，API的/v1/jobs加lut上传字段 | feat |
 | P2a | 2026-07-21 | core/lut_grain重构为core/physical_fx，内部拆成LUT/颗粒/halation/滚降/暗角5个独立效果文件+STAGES有序效果链，便于后续新增物理效果 | refactor |

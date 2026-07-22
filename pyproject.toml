@@ -3,6 +3,8 @@ name = "proimages"
 version = "0.1.0"
 description = "AI + physical modeling pipeline that makes phone/action-cam photos look camera-shot"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
@@ -15,6 +17,8 @@ dependencies = [
     "huggingface_hub>=0.25",
     "colour-science>=0.4.3",
     "scipy>=1.11",
+    "openai>=1.40",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +30,7 @@ dev = [
 [project.scripts]
 proimages = "proimages.cli:main"
 proimages-api = "proimages.api.server_cli:main"
+proimages-lut = "proimages.lut_cli:main"
 
 [build-system]
 requires = ["hatchling"]
