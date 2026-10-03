@@ -22,15 +22,21 @@ dependencies = [
 
 [project.optional-dependencies]
 # Needed by core/denoise, core/hdr, core/depth_bokeh and RAW input. Without it,
-# gpu_config reports "cpu" and core/system/io only decodes JPEG/PNG/HEIC.
+# gpu_config reports "cpu" and core/system/io cannot read RAW files.
 heavy = [
     "torch>=2.2",
     "rawpy>=0.21",
     "huggingface_hub>=0.25",
 ]
+# HEIC/HEIF input (the iPhone default). pi-heif is the decode-only build: its wheels carry
+# the LGPL libheif/libde265, unlike pillow-heif, whose wheels also bundle the GPL x265 encoder.
+heif = [
+    "pi-heif>=1.0",
+]
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
+    "opencolorio>=2.3",
 ]
 
 [project.scripts]

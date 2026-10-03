@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from proimages.core.lut_gen.bake import bake_cube_file, bake_cube_text
+from proimages.core.lut_gen.cdl import format_cdl, to_cdl
 from proimages.core.lut_gen.params import GradeParams
 from proimages.core.physical_fx.lut import apply_lut
 
@@ -32,8 +33,17 @@ def test_bake_cube_text_has_cube_header_and_metadata():
 
     assert 'TITLE "Peek"' in text
     assert "LUT_3D_SIZE 2" in text
-    assert "schema_version 1" in text
+    assert "schema_version 2" in text
     assert "a test look" in text
+
+
+def test_bake_cube_text_records_the_cdl_numbers():
+    params = GradeParams(temperature=0.4, contrast=1.2, saturation=0.8)
+
+    text = bake_cube_text(params, size=2)
+
+    assert f"# {format_cdl(to_cdl(params))}" in text
+    assert "# ASC CDL slope " in text
 
 
 def test_bake_size_controls_entry_count():

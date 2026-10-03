@@ -15,9 +15,11 @@ def _job_store(request: Request) -> JobStore:
     return request.app.state.job_store
 
 
-async def _run_and_cleanup(job_id: str, image_bytes: bytes, job_store: JobStore, lut_path: Path | None) -> None:
+async def _run_and_cleanup(
+    job_id: str, image_bytes: bytes, job_store: JobStore, lut_path: Path | None, filename: str | None
+) -> None:
     try:
-        await run_job(job_id, image_bytes, job_store, lut_path=lut_path)
+        await run_job(job_id, image_bytes, job_store, lut_path=lut_path, filename=filename)
     finally:
         if lut_path is not None:
             lut_path.unlink(missing_ok=True)
@@ -36,7 +38,7 @@ async def submit_job(request: Request, file: UploadFile, lut: UploadFile | None 
             tmp.write(lut_bytes)
             lut_path = Path(tmp.name)
 
-    asyncio.create_task(_run_and_cleanup(record.job_id, image_bytes, job_store, lut_path))
+    asyncio.create_task(_run_and_cleanup(record.job_id, image_bytes, job_store, lut_path, file.filename))
     return {"job_id": record.job_id, "status": record.status.value}
 
 

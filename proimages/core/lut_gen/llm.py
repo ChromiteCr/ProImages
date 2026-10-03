@@ -5,9 +5,10 @@ import json
 import numpy as np
 from openai import OpenAI
 from PIL import Image
+from pydantic import ValidationError
 
 from proimages.core.lut_gen.image_stats import extract_color_stats
-from proimages.core.lut_gen.params import GradeParams
+from proimages.core.lut_gen.params import GradeParams, format_validation_error
 from proimages.core.lut_gen.prompts import DESCRIPTION_PROMPT, REFERENCE_PROMPT, SYSTEM_PROMPT
 
 REFERENCE_MAX_EDGE = 512
@@ -19,17 +20,34 @@ def _client(api_key: str, base_url: str | None) -> OpenAI:
 
 def _parse_params(content: str) -> GradeParams:
     payload = json.loads(content)
-    payload.pop("schema_version", None)
+    if isinstance(payload, dict):
+        payload.pop("schema_version", None)
     return GradeParams.model_validate(payload)
 
 
-def _complete(client: OpenAI, model: str, messages: list[dict]) -> GradeParams:
+def _request(client: OpenAI, model: str, messages: list[dict]) -> str:
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         response_format={"type": "json_object"},
     )
-    return _parse_params(response.choices[0].message.content)
+    return response.choices[0].message.content
+
+
+def _retry_messages(messages: list[dict], content: str, exc: json.JSONDecodeError | ValidationError) -> list[dict]:
+    problem = format_validation_error(exc) if isinstance(exc, ValidationError) else str(exc)
+    reply = f"That JSON was invalid: {problem}. Reply with the corrected JSON object only."
+    return [*messages, {"role": "assistant", "content": content}, {"role": "user", "content": reply}]
+
+
+def _complete(client: OpenAI, model: str, messages: list[dict]) -> GradeParams:
+    """Ask for parameters; if the reply is not valid, show the model its mistake and ask once more."""
+    content = _request(client, model, messages)
+    try:
+        return _parse_params(content)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        retry = _retry_messages(messages, content, exc)
+    return _parse_params(_request(client, model, retry))
 
 
 def _encode_reference(image: np.ndarray) -> str:
