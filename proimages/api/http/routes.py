@@ -1,12 +1,16 @@
 import asyncio
+import functools
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile
+from pydantic import Json
 
 from proimages.api.jobs.models import JobStatus
 from proimages.api.jobs.runtime import run_job
 from proimages.api.jobs.store import JobStore
+from proimages.core.options import ProcessOptions
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
@@ -15,20 +19,26 @@ def _job_store(request: Request) -> JobStore:
     return request.app.state.job_store
 
 
-async def _run_and_cleanup(
-    job_id: str, image_bytes: bytes, job_store: JobStore, lut_path: Path | None, filename: str | None
-) -> None:
+async def _run_and_cleanup(job: Callable[[], Awaitable[None]], lut_path: Path | None) -> None:
     try:
-        await run_job(job_id, image_bytes, job_store, lut_path=lut_path, filename=filename)
+        await job()
     finally:
         if lut_path is not None:
             lut_path.unlink(missing_ok=True)
 
 
 @router.post("")
-async def submit_job(request: Request, file: UploadFile, lut: UploadFile | None = None):
-    job_store = _job_store(request)
-    record = await job_store.create()
+async def submit_job(
+    request: Request,
+    file: UploadFile,
+    lut: UploadFile | None = None,
+    options: Json[ProcessOptions] | None = Form(
+        default=None, description="ProcessOptions as a JSON string; leave it out for the default pipeline."
+    ),
+):
+    # FastAPI validates `options` before this body runs, so a bad value is a 422 that leaves
+    # no job and no temporary LUT file behind.
+    state = request.app.state
     image_bytes = await file.read()
 
     lut_path: Path | None = None
@@ -38,7 +48,22 @@ async def submit_job(request: Request, file: UploadFile, lut: UploadFile | None 
             tmp.write(lut_bytes)
             lut_path = Path(tmp.name)
 
-    asyncio.create_task(_run_and_cleanup(record.job_id, image_bytes, job_store, lut_path, file.filename))
+    # Only now: a failure above must not leave a job that nothing will ever run.
+    record = await state.job_store.create()
+    job = functools.partial(
+        run_job,
+        record.job_id,
+        image_bytes,
+        state.job_store,
+        state.job_slots,
+        lut_path=lut_path,
+        filename=file.filename,
+        options=options,
+        device=state.device,
+    )
+    task = asyncio.create_task(_run_and_cleanup(job, lut_path))
+    state.job_tasks.add(task)
+    task.add_done_callback(state.job_tasks.discard)
     return {"job_id": record.job_id, "status": record.status.value}
 
 

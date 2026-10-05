@@ -18,7 +18,7 @@ def main() -> None:
     print(f"using device: {device}")
 
     image = load_image(args.input)
-    result = process_image(image, lut_path=args.lut)
+    result = process_image(image, lut_path=args.lut, device=device)
     save_image(result, args.output)
 
 

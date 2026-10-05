@@ -1,5 +1,2 @@
-import numpy as np
-
-
-def process(image: np.ndarray) -> np.ndarray:
-    return image
+"""Noise reduction stage. Not implemented yet, so the pipeline never runs it; the README's
+development plan (开发规划) describes what will live here."""

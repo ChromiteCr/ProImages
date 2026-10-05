@@ -1,5 +1,5 @@
 # ProImages
-![version](https://img.shields.io/badge/version-P2f-blue)
+![version](https://img.shields.io/badge/version-P2g-blue)
 ![last commit](https://img.shields.io/github/last-commit/ChromiteCr/ProImages)
 ![commit activity](https://img.shields.io/github/commit-activity/m/ChromiteCr/ProImages)
 ![stars](https://img.shields.io/github/stars/ChromiteCr/ProImages)
@@ -14,7 +14,7 @@
 
 除了这四个处理模块，还有一个**AI生成LUT**模块（`proimages/core/lut_gen`）：用户填入自己的模型名称和API Key，用一句话描述想要的风格、或丢一张参考图，就能生成一个`.cube`文件供上面第4个模块使用。详见下方"AI生成LUT"一节。
 
-`denoise`、`hdr`、`depth_bokeh`三个模块目前还是占位直通（identity）。`physical_fx`里的5个效果——LUT、颗粒、halation、滚降、暗角——现在全部是真实算法（见下）。
+`denoise`、`hdr`、`depth_bokeh`三个模块还没有实现，管线目前不调用它们。它们以后都默认关闭：每个模块落地时在管线参数对象`ProcessOptions`里加上自己的子选项，调用方设置了这个子选项，管线才会运行这一步。`physical_fx`里的5个效果——LUT、颗粒、halation、滚降、暗角——现在全部是真实算法（见下）。
 
 ### LUT应用（`physical_fx/lut.py`）
 
@@ -115,9 +115,14 @@ proimages/
                       报错指明该装哪个组。16位灰度图按真实亮度读取（Pillow默认转换会把它截成全白）；
                       读不出来的文件统一报ValueError("not a readable <格式> file")，不再把对象地址
                       之类的内部信息带进API的任务状态。save_image()/encode_png()编码回8位图片
-    denoise/          降噪模块，process(image)->image，当前直通
-    hdr/               HDR模块，process(image)->image，当前直通
-    depth_bokeh/      景深虚化模块，process(image)->image，当前直通
+    system/tiling.py tiled_apply(fn, image, tile=512, overlap=64, multiple=64)：整图先reflect补边
+                      （边缘像素和内部像素一样有上下文），切成相互重叠的块逐块交给fn（块的宽高都是
+                      multiple的倍数，传进去的是副本，fn可以原地改），再用升余弦羽化拼回去——相邻两块
+                      的权重在重叠区相加恰好为1，所以没有接缝；numpy进numpy出，fn可以改变通道数。
+                      P3的SCUNet分块推理用它，12MP时额外占用约555MB
+    denoise/          降噪模块，尚未实现（P3），管线不调用
+    hdr/               HDR模块，尚未实现（P4），管线不调用
+    depth_bokeh/      景深虚化模块，尚未实现（P5/P5a），管线不调用
     physical_fx/      LUT调色与物理相机/胶片效果模块，process(image, lut_path=None)->image
       __init__.py     process()：lut_path给定时先调apply_lut()，再依次跑STAGES里的4个效果
       effects.py      STAGES列表：[apply_grain, apply_halation, apply_rolloff, apply_vignette]
@@ -143,34 +148,76 @@ proimages/
       llm.py          OpenAI兼容客户端，params_from_description()/params_from_reference_image()，
                       校验失败时重试一次
       prompts.py      system prompt（公式、中性值、JSON示例）和两条入口各自的user prompt模板
-    color/            色彩空间共用工具；luminance(image)->ndarray按Rec.709权重算亮度，
-                      grain.py、halation.py、lut_gen/grade.py、lut_gen/image_stats.py都复用它
-    pipeline.py       process_image(image, lut_path=None)按denoise→hdr→depth_bokeh→physical_fx的顺序
-                      依次调用，lut_path透传给physical_fx.process()
+    color/            色彩空间共用工具
+      __init__.py     luminance(image)->ndarray按Rec.709权重算亮度，grain.py、halation.py、
+                      lut_gen/grade.py、lut_gen/image_stats.py、noise.py都复用它
+      transfer.py     srgb_to_linear()/linear_to_srgb()：IEC 61966-2-1的sRGB分段曲线（解码阈值0.04045、
+                      编码阈值0.0031308），全程float32，12MP三通道约0.11s；不依赖colour-science（它输出
+                      float64且更慢，只在测试里当对照，两者相差<1e-6）。负值走线性段、大于1走幂段、
+                      不做裁切，任何有限输入都不出NaN。P4要在线性光里乘增益，靠它进出线性光
+    filters.py        边缘保持滤波，P3色度降噪、P4底层提取、P5深度精修共用：
+                      box(x, r)：(2r+1)²窗口均值，边界按半像素对称反射；
+                      guided_filter(guide, src, r, eps)：He、Sun、Tang的引导滤波，灰度引导用标量公式，
+                      彩色引导用3×3协方差形式（逐像素闭式求逆，向量化，不走Python循环；求逆这一步
+                      在系数分辨率上用float64做——接近中性灰的彩色引导图在小eps下协方差矩阵几乎
+                      奇异，float32求逆在eps=1e-6时误差从0.5左右到几十不等，float64下在1e-4量级）；
+                      guided_filter按全分辨率计算，12MP彩色引导要好几GB内存，整张照片请用下面两个；
+                      fast_guided_filter(guide, src, r, eps, s)：在1/s分辨率上拟合系数、双线性放大后
+                      作用到全分辨率引导图上（12MP灰度、s=4、r=16约54ms）；
+                      guided_upsample(guide, src, r, eps)：把低分辨率的图（比如模型出的深度图）借
+                      全分辨率彩色照片的边缘放大回原尺寸（378×504→12MP约0.15s），同亮度的红绿交界
+                      这种只有颜色差别的边缘也能保住。计算前先减去全局均值，避免float32下
+                      var=E[I²]−E[I]²的相消误差（log2亮度约−8时尤其明显）；输出一律float32
+    noise.py          estimate_noise(image)->float：Donoho的MAD噪声估计——取最细一层Haar小波的对角子带
+                      HH，σ=median(|HH|)/0.6745，在显示编码的Rec.709亮度上算，是相对尺度、不含色度
+                      噪声（三通道各自独立的噪声σ在亮度上表现为约0.749σ），12MP约40ms。中位数对边缘
+                      不敏感，只有纹理很密的画面会偏高；反过来，大片平坦或被裁切（过曝、死黑）的区域
+                      HH恰好为0，会把中位数往下拉——σ=0.012的噪声在平坦区占20%/30%/40%时读成
+                      0.0089/0.0066/0.0038，超过一半时直接是0。P3按它决定降噪强度、P4按它收小增益，
+                      用之前都要先把这些区域排除掉
+    options.py        ProcessOptions（pydantic模型）：选择要跑哪些可选阶段。每个阶段落地时才加入
+                      自己的子选项字段，设置了该字段就开启这一步，所以不会出现"开了却没实现"的
+                      选项；拒绝未知字段；不含任何文件路径（API从任意客户端接收这个JSON，带路径就
+                      等于让请求指挥服务器读写文件，文件一律走上传）。目前还没有字段，只接受{}
+    pipeline.py       process_image(image, lut_path=None, options=None, device=None)：可选阶段按
+                      denoise→hdr→depth_bokeh的顺序、只在options设置了对应子选项时运行，最后一律
+                      交给physical_fx.process()（lut_path透传）。三个可选阶段都还没实现，所以现在
+                      等同于直接调physical_fx——有测试固定随机种子逐位核对这一点。device是需要
+                      模型的阶段在哪个设备上跑（cuda/mps/cpu），None表示由阶段自己探测
   gpu_config.py       detect_device()探测cuda/mps/cpu，支持传override参数强制指定；
                       torch是惰性import，未安装（基础安装）时返回"cpu"，
                       这样基础安装也能起完整API而不是在启动时崩掉
   model_download.py  ensure_model(repo_id)用huggingface_hub.snapshot_download把预训练权重下载到
                       ~/.cache/proimages/models/（可用PROIMAGES_MODELS_DIR环境变量改路径），已存在则直接复用缓存
   cli_args.py         add_device_argument()定义共用的--device参数，CLI和API服务入口都调用它
-  cli.py              proimages命令行入口：读入一张图片路径→跑process_image()→写到输出路径
+  cli.py              proimages命令行入口：读入一张图片路径→跑process_image()→写到输出路径；
+                      探测到（或--device指定）的设备会传给process_image()
   lut_cli.py          proimages-lut命令行入口：--describe/--reference/--params三选一，
                       生成或烘焙出.cube，--cdl-out另存.cc；--params路径不调LLM也不需要Key
   api/
     app.py            FastAPI应用实例，挂载GET /health、jobs路由和luts路由
     lifespan.py       FastAPI启动时用detect_device()探测设备存到app.state.device，
-                      并创建一个JobStore实例存到app.state.job_store
+                      创建一个JobStore实例存到app.state.job_store，按PROIMAGES_MAX_JOBS（默认1）
+                      创建任务槽位app.state.job_slots（asyncio.Semaphore），并用app.state.job_tasks
+                      持有后台任务的引用（事件循环对任务只保留弱引用）。PROIMAGES_MAX_JOBS不是
+                      正整数时服务直接启动失败并说明原因
     server_cli.py     proimages-api命令行入口：解析--host/--port/--device，用uvicorn跑api.app:app
     jobs/
       models.py       JobStatus枚举（pending/running/completed/failed）和JobRecord数据类
                       （job_id、状态、创建时间、结果字节、错误信息）
       store.py        JobStore：内存态的{job_id: JobRecord}字典，所有读写都加asyncio.Lock
-      runtime.py      run_job()：用decode_image()按上传文件名解码（与CLI同一套EXIF/HEIC/RAW处理）
-                      →跑process_image()→编码成PNG字节→写回JobStore，异常会被捕获并记成failed状态
-                      而不是让请求本身报错
+      runtime.py      run_job()：先等一个任务槽位（等待期间状态保持pending），拿到后标成running，
+                      用decode_image()按上传文件名解码（与CLI同一套EXIF/HEIC/RAW处理）→带着options
+                      和服务器设备跑process_image()→编码成PNG字节→写回JobStore；解码、处理、编码
+                      都在槽位内完成，所以同时解码展开在内存里的照片不超过PROIMAGES_MAX_JOBS张（排队
+                      的任务仍各自持有上传的原始字节，排队长度不设上限；做完的PNG结果也一直留在
+                      内存里的JobStore中，目前没有清理）。异常会被捕获并记成failed状态，而不是让
+                      请求本身报错
     http/
-      routes.py       三个接口：POST /v1/jobs（上传文件，创建任务并用asyncio.create_task后台跑，
-                      立即返回job_id）、GET /v1/jobs/{job_id}（查状态，不存在返回404）、
+      routes.py       三个接口：POST /v1/jobs（上传文件，可选的lut上传和options字段——ProcessOptions
+                      的JSON字符串；创建任务并用asyncio.create_task后台跑，立即返回job_id。options
+                      由FastAPI在进入处理函数之前校验，非法JSON、未知字段一律422，不会先建任务、
+                      写临时LUT文件再失败）、GET /v1/jobs/{job_id}（查状态，不存在返回404）、
                       GET /v1/jobs/{job_id}/result（状态不是completed时返回409，是的话返回PNG字节）
       lut_routes.py   两个接口：POST /v1/luts/generate（传describe或reference + model/api_key
                       /base_url，模型调用放在工作线程里不阻塞服务，返回GradeParams、CDL数值、
@@ -192,7 +239,7 @@ CLI和API服务共用同一份`core/`处理逻辑，不存在"CLI版本"和"API�
 | | 包含 | 装出来的虚拟环境 | 能用什么 |
 |---|---|---|---|
 | **基础安装** | fastapi、uvicorn、python-multipart、numpy、pillow、colour-science、scipy、openai、pydantic | ~220MB | LUT全链路：`core/lut_gen`生成LUT、`core/physical_fx`全部5个效果、完整API（含`/v1/luts/*`和`/v1/jobs`）、三个CLI入口 |
-| **`heavy`可选组** | 额外加torch、rawpy、huggingface_hub | ~800MB+ | 再加上RAW格式输入，以及`core/denoise`、`core/hdr`、`core/depth_bokeh`（这三个模块目前还是占位直通，等接入预训练模型后才真正需要） |
+| **`heavy`可选组** | 额外加torch、rawpy、huggingface_hub | ~800MB+ | 再加上RAW格式输入，以及`core/denoise`、`core/hdr`、`core/depth_bokeh`里需要预训练模型的部分（这三个模块尚未实现，管线目前不调用） |
 | **`heif`可选组** | 额外加pi-heif | +约1MB | 读取HEIC/HEIF（iPhone默认的拍照格式） |
 
 `heif`组刻意用只含解码器的pi-heif而不是pillow-heif：两者接口相同，但pillow-heif的安装包里捆绑了GPL许可的x265编码器，pi-heif只带LGPL的libheif/libde265，更适合这个MIT项目。
@@ -224,13 +271,20 @@ uv run proimages-api --host 127.0.0.1 --port 8001     # API：起服务
 # 另开一个终端：
 curl -X POST http://127.0.0.1:8001/v1/jobs -F "file=@input.jpg"                                    # 提交，不调色
 curl -X POST http://127.0.0.1:8001/v1/jobs -F "file=@input.jpg" -F "lut=@Example-LUTs/Arabica 12.CUBE"  # 提交，套用LUT
+curl -X POST http://127.0.0.1:8001/v1/jobs -F "file=@input.jpg" -F 'options={}'                    # 提交，带管线参数（JSON字符串）
 curl http://127.0.0.1:8001/v1/jobs/<job_id>                        # 查状态
 curl http://127.0.0.1:8001/v1/jobs/<job_id>/result -o output.png   # 完成后取结果
+
+PROIMAGES_MAX_JOBS=2 uv run proimages-api   # 允许同时处理2个任务（默认1个）
 
 uv run pytest                    # 跑测试
 ```
 
 API和CLI共用同一套解码：上传RAW或HEIC时，接口按上传文件名的后缀选择解码方式（`curl -F "file=@photo.dng"`会自动带上文件名），同样需要装对应的可选组。
+
+`options`字段是`ProcessOptions`的JSON字符串，不传就是默认管线。目前三个可选阶段都没实现，所以它只接受`{}`；写`{"denoise": {}}`这类还不存在的阶段会直接返回422（`extra_forbidden`），而不是被悄悄忽略。降噪、HDR、景深各自落地时会加上自己的子选项，届时在这里写`{"denoise": {...}}`即可开启。
+
+任务并发：服务器同一时间最多处理`PROIMAGES_MAX_JOBS`个任务（默认1），多出来的任务在`GET /v1/jobs/{job_id}`里显示为`pending`，前一个做完自动开始。限制的是内存而不是CPU：每个在跑的任务都持有解码后的整张照片和各阶段的工作副本，后续的景深渲染器在8MP下一次就要约2.6GB。这个值在服务启动时读取，不是正整数（比如`0`、`two`）时服务直接启动失败并给出原因。
 
 生成LUT（`proimages-lut`）：
 
@@ -267,7 +321,13 @@ uv run proimages-lut --describe "赛博朋克冷调" --model deepseek-chat \
 
 API Key也可以通过`PROIMAGES_API_KEY`环境变量传，省得每次敲。生成出来的`.cube`直接就能给上面的`proimages --lut`用。`--size`（默认33）限2..64。
 
-`--device`不传时会自动探测：有CUDA用cuda，苹果芯片用mps，否则用cpu。
+`--device`不传时会自动探测：有CUDA用cuda，苹果芯片用mps，否则用cpu。CLI把探测结果传给`process_image()`，API服务把启动时探测的`app.state.device`传给每个任务——目前还没有需要模型的阶段，P3的SCUNet降噪、P5a的深度估计会在这个设备上跑。
+
+测试护栏（仓库根目录的`conftest.py`，在pytest启动、收集测试之前就装好，所以测试文件的模块级代码和module/session级fixture也受约束）：
+
+- **不联网**：连接非本机地址的socket（`connect`/`connect_ex`）和非本机域名的解析（`getaddrinfo`/`gethostbyname`/`gethostbyname_ex`）一律抛错。光拦这些还不够——本机设了`HTTP(S)_PROXY=http://127.0.0.1:7897`这类本地代理时，HTTP客户端连的是本机代理端口，由代理替它出网。所以护栏同时清掉`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（大小写都清），并把`NO_PROXY`设成`*`（这也让urllib、requests不再回退到macOS的系统代理）。验证护栏的网络断言只用永远不会被路由的192.0.2.1和保留的`.invalid`域名，护栏失效时也连不上任何真实服务器（`.invalid`顶多引发一次注定查不到的DNS查询）；验证下载护栏的测试先确认护栏已经装好，再用一个不存在的仓库名调用，即使用`pytest --noconftest`跳过护栏也不会真的下载权重
+- **不下载模型**：`model_download.ensure_model`一调用就抛错；`model_download.MODELS_DIR`指向一个空的临时目录，这样即使某个模块在导入时就拿到了真正的`ensure_model`，也只会缓存未命中、撞上网络护栏，而不会悄悄加载本机已下载的权重。用到模型的测试要自己monkeypatch加载函数
+- **基础安装能导入全部模块**：`proimages/guards_test.py`在子进程里把torch、torchvision、rawpy、huggingface_hub、transformers、spandrel、pi_heif都设为不可导入，再按文件逐个导入`proimages`下的全部模块（包括没有`__init__.py`的目录），守住"可选依赖一律在函数里惰性import"这条约束；以后的阶段引入新的重依赖时要加进这个列表
 
 测试用的样张（`Example-imgs/`）和LUT文件（`Example-LUTs/`，35个`.CUBE`文件）只放在本地，`.gitignore`里已排除，不会进版本库。
 
@@ -279,7 +339,7 @@ API Key也可以通过`PROIMAGES_API_KEY`环境变量传，省得每次敲。生
 |---|---|---|---|
 | P2e | LGG行业标准化 | GradeParams v2：以ASC CDL v1.2为底层数学，LGG用标准中性值（0/1/1），整套调色可导出`.cc`给Resolve/Nuke | 完成 |
 | P2f | 输入层修正 | EXIF方向、HEIC（`heif`可选组）、RAW改用拍摄白平衡与sRGB曲线、统一字节解码 | 完成 |
-| P2g | 管线接线与共享工具 | 管线参数对象、设备传递、API的`options`字段与并发上限；引导滤波、sRGB转换、噪声估计、分块推理等共享工具 | 待开始 |
+| P2g | 管线接线与共享工具 | 管线参数对象、设备传递、API的`options`字段与并发上限；引导滤波、sRGB转换、噪声估计、分块推理等共享工具 | 完成 |
 | P3 | 降噪 | SCUNet分块推理（heavy）+ 无torch的色度降噪兜底 + 噪声门控 | 待开始 |
 | P4 | 动态范围 | 边缘保持的局部增益图：只提亮阴影，过曝区不变灰 | 待开始 |
 | P5 | 景深虚化 | 线性光分层FFT物理虚化渲染器 + 外部深度图输入（纯numpy，基础安装可用） | 待开始 |
@@ -298,6 +358,7 @@ API Key也可以通过`PROIMAGES_API_KEY`环境变量传，省得每次敲。生
 
 | 版本 | 日期 | 变更内容 | 类型 |
 |------|------|----------|------|
+| P2g | 2026-10-05 | 管线接线与共享工具：新增管线参数对象ProcessOptions（拒绝未知字段、不含文件路径），process_image接收options和device，CLI与API把探测到的设备传进管线；POST /v1/jobs新增options字段（ProcessOptions的JSON字符串，非法时在建任务之前就返回422）；新增PROIMAGES_MAX_JOBS任务槽位（默认1），超出的任务排队显示为pending；降噪/HDR/景深三个占位模块不再被管线调用，等各自实现后由options开启；新增共享numpy工具：引导滤波、快速引导滤波与彩色引导上采样（core/filters），float32的sRGB转换（core/color/transfer），Haar-MAD噪声估计（core/noise），升余弦羽化的分块处理（core/system/tiling）；测试护栏：pytest收集测试之前就禁止下载模型和联网（本机HTTP代理这条路也堵上），子进程导入图测试守住基础安装不依赖torch等可选依赖 | feat |
 | P2f | 2026-10-01 | 输入层修正：按EXIF方向摆正照片（此前手机竖拍会横着出来）；新增heif可选组（只含解码器的pi-heif）读取HEIC；RAW改用拍摄白平衡与sRGB曲线显影（此前是rawpy默认的日光白平衡与BT.709曲线，RAW默认输出因此改变）；修复16位灰度图被读成全白；读不出的文件给出干净的错误信息；新增decode_image()统一CLI、任务接口和参考图的解码，API因此也能收RAW/HEIC；/v1/luts/generate的参考图在调用模型前解码，读不出返回422、缺解码组返回501并写明该装哪个组 | fix |
 | P2e | 2026-09-30 | LGG行业标准化：GradeParams升级到v2（不兼容v1），以ASC CDL v1.2为底层数学，lift/gamma/gain改用标准中性值0/1/1，多余字段与旧版schema一律拒绝；整套调色可导出.cc（OpenColorIO读回误差约1e-5）；提示词写明公式、中性值与JSON示例，模型输出校验失败时重试一次；参考图统计新增逐通道分位数与粗略CDL拟合；/v1/luts/generate不再阻塞事件循环，size限2..64；README加徽章与「开发规划」一节 | feat |
 | P2d1 | 2026-07-22 | 拆分依赖：torch/rawpy/huggingface_hub移入heavy可选组，基础安装只保留LUT链路所需（虚拟环境800M+降至~220MB）；gpu_config的torch改为惰性import并在缺失时回退cpu，使基础安装也能起完整API；RAW读取缺rawpy时报错指向heavy组 | refactor |
